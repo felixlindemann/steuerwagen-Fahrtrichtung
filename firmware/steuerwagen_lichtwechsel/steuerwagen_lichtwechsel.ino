@@ -180,28 +180,57 @@ void updateLightingFaded() {
 // =====================================================================================
 
 void setup() {
+    // Serielle Schnittstelle für Debugging ohne LEDs
+    Serial.begin(115200);
+
     // Pins initialisieren
     pinMode(PIN_HALL_A, INPUT_PULLUP);
     pinMode(PIN_HALL_B, INPUT_PULLUP);
     pinMode(PIN_LED_WHITE, OUTPUT);
     pinMode(PIN_LED_RED, OUTPUT);
+    pinMode(LED_BUILTIN, OUTPUT); // Onboard-LED auf Pin 13 als optischer Indikator
 
-    // Initialer Zustand: Vorwärts (Frontlicht weiß an)
+    // Initialer Zustand: Vorwärts (Frontlicht weiß an, Onboard-LED an)
     updateLightingInstant();
+    digitalWrite(LED_BUILTIN, HIGH);
 
-    // Interrupts scharfschalten
+    // Hardware-Interrupts scharfschalten
     attachInterrupt(digitalPinToInterrupt(PIN_HALL_A), isr_hall_a, FALLING);
     attachInterrupt(digitalPinToInterrupt(PIN_HALL_B), isr_hall_b, FALLING);
+
+    Serial.println(F("\n========================================================"));
+    Serial.println(F(" Steuerwagen Fahrtrichtungs-Lichtwechsel (Märklin 78479)"));
+    Serial.println(F(" Debug-Ausgabe aktiv (115200 Baud)"));
+    Serial.println(F(" Hinweis: Onboard-LED (Pin 13) leuchtet bei VORWAERTS"));
+    Serial.println(F(" Initialer Zustand: VORWAERTS [Frontlicht WEISS]"));
+    Serial.println(F("========================================================\n"));
 }
 
 void loop() {
-    // Sanftes Überblenden oder direktes Schalten
-    if (ENABLE_SOFT_FADE) {
-        updateLightingFaded();
-    } else {
-        if (directionChanged) {
-            directionChanged = false;
+    // Debug-Ausgabe & Statusmeldung bei erkanntem Richtungswechsel
+    if (directionChanged) {
+        directionChanged = false;
+
+        Serial.print(F("["));
+        Serial.print(millis());
+        Serial.print(F(" ms] RICHTUNGSWECHSEL ERKANNT -> "));
+
+        if (targetDirection == DIR_FORWARD) {
+            Serial.println(F(">>> VORWAERTS (Frontlicht WEISS) | Onboard-LED: AN"));
+            digitalWrite(LED_BUILTIN, HIGH);
+        } else {
+            Serial.println(F("<<< RUECKWAERTS (Schlusslicht ROT) | Onboard-LED: AUS"));
+            digitalWrite(LED_BUILTIN, LOW);
+        }
+
+        if (!ENABLE_SOFT_FADE) {
             updateLightingInstant();
         }
     }
+
+    // Sanftes Überblenden (falls aktiviert)
+    if (ENABLE_SOFT_FADE) {
+        updateLightingFaded();
+    }
 }
+
