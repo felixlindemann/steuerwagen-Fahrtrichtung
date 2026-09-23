@@ -122,9 +122,11 @@ void applyLighting() {
     if (currentDirection == DIR_FORWARD) {
         digitalWrite(PIN_LED_WHITE, HIGH);
         analogWrite(PIN_LED_RED, 0); // Rot aus
+        digitalWrite(LED_BUILTIN, HIGH); // Onboard-LED an
     } else if (currentDirection == DIR_REVERSE) {
         digitalWrite(PIN_LED_WHITE, LOW); // Weiß aus
         analogWrite(PIN_LED_RED, redPwmValue); // Rot gedimmt
+        digitalWrite(LED_BUILTIN, LOW);  // Onboard-LED aus
     }
 }
 
@@ -251,6 +253,7 @@ void setup() {
     pinMode(PIN_HALL_B, INPUT_PULLUP);
     pinMode(PIN_LED_WHITE, OUTPUT);
     pinMode(PIN_LED_RED, OUTPUT);
+    pinMode(LED_BUILTIN, OUTPUT);
 
     // Initialen Lichtzustand herstellen (Standard: Vorwärts = Frontlicht)
     applyLighting();

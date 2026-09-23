@@ -30,23 +30,47 @@ def main():
     print(" Beenden mit Ctrl + C")
     print("========================================================\n")
 
-    try:
-        ser = serial.Serial(port, baudrate, timeout=0.1)
-    except Exception as e:
-        print(f"Konnte Port {port} nicht öffnen: {e}")
-        sys.exit(1)
+    while True:
+        try:
+            ser = serial.Serial(port, baudrate, timeout=0.1)
+            print(f"[Verbunden mit {port}]\n")
+            break
+        except Exception as e:
+            print(f"Warte auf Port {port}... ({e})")
+            time.sleep(1.5)
+            port = find_arduino_port()
 
     try:
         while True:
-            line = ser.readline()
-            if line:
-                decoded = line.decode('utf-8', errors='replace').rstrip()
-                if decoded:
-                    print(decoded)
+            try:
+                line = ser.readline()
+                if line:
+                    decoded = line.decode('utf-8', errors='replace').rstrip()
+                    if decoded:
+                        print(decoded)
+            except (serial.SerialException, OSError) as err:
+                print(f"\n[USB-Verbindung kurz getrennt: {err}]")
+                print("[Versuche automatische Wiederverbindung...]")
+                try:
+                    ser.close()
+                except Exception:
+                    pass
+                time.sleep(1)
+                while True:
+                    try:
+                        port = find_arduino_port()
+                        ser = serial.Serial(port, baudrate, timeout=0.1)
+                        print(f"[Wieder verbunden mit {port}!]\n")
+                        break
+                    except Exception:
+                        time.sleep(1)
     except KeyboardInterrupt:
         print("\nMonitor beendet.")
     finally:
-        ser.close()
+        try:
+            ser.close()
+        except Exception:
+            pass
 
 if __name__ == '__main__':
     main()
