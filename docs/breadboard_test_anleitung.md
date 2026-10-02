@@ -73,14 +73,16 @@ Auf einem Standard-Breadboard sind die 5 Löcher einer Reihe (z. B. Reihe 15: Sp
   Reihe 16: Pin 2 (GND) -----------> Verbinden mit [-] GND
   Reihe 17: Pin 3 (OUT) -----------> Verbinden mit Arduino Pin D3
 
-  LED Weiß (Frontlicht):
-  Reihe 22: Anode (+) (langes Bein) -> 1 kΩ Widerstand -> Arduino Pin D4
-  Reihe 23: Kathode (-) (kurzes Bein) -> Verbinden mit [-] GND
-
-  LED Rot (Schlusslicht):
-  Reihe 26: Anode (+) (langes Bein) -> 1 kΩ Widerstand -> Arduino Pin D5 (PWM)
-  Reihe 27: Kathode (-) (kurzes Bein) -> Verbinden mit [-] GND
+  WS2811 LED-Treiber (z. B. SOP-8 Breakout):
+  Pin 8 (VDD) ---------------------> Verbinden mit [+] 5V
+  Pin 4 (GND) ---------------------> Verbinden mit [-] GND
+  Pin 6 (DIN) ---------------------> Verbinden mit Arduino Pin D6
+  Pin 2 (OUTG - Vorwärts) ---------> Kathode (-) der Vorwärts-LED(s) (Spitzenlicht Weiß, Anode an 5V)
+  Pin 1 (OUTR - Rückwärts) --------> Kathode (-) der Rückwärts-LED(s) (Schlusslicht Rot, Anode an 5V)
 ```
+
+> [!NOTE]
+> Die WS2811-Ausgänge `OUTG` und `OUTR` sind Konstantstromsenken (Open-Drain gegen GND). Die LEDs werden mit der Anode an +5V und mit der Kathode an die Pins G und R angeschlossen.
 
 ---
 
@@ -108,15 +110,15 @@ Da der $2 \times 1\text{ mm}$ Neodym-Magnet sehr klein ist, muss vor dem Festkle
 2. **Simulierte Vorwärtsfahrt:**
    * Führe den Magneten zügig von **Sensor A nach Sensor B** vorbei.
    * **Ergebnis:**
-     * Front-LED (Weiß) leuchtet auf.
-     * Rote LED erlischt.
-     * Ausgabe: `[TRIGGER] VORWAERTS [Front Weiss] | Methode 1: VORWAERTS | Zaehler A: 1 B: 1`.
+     * WS2811 schaltet **Kanal G** ein (Spitzenlicht Weiß).
+     * Kanal R erlischt.
+     * Ausgabe: `[TRIGGER] VORWAERTS [WS2811 Kanal G aktiv] | Methode 1: VORWAERTS | Zaehler A: 1 B: 1`.
 3. **Simulierte Rückwärtsfahrt:**
    * Führe den Magneten in Gegenrichtung von **Sensor B nach Sensor A** vorbei.
    * **Ergebnis:**
-     * Front-LED erlischt.
-     * Rote LED leuchtet auf.
-     * Ausgabe: `[TRIGGER] RUECKWAERTS [Schluss Rot] | Zaehler A: 2 B: 2`.
+     * WS2811 schaltet **Kanal R** ein (Schlusslicht Rot).
+     * Kanal G erlischt.
+     * Ausgabe: `[TRIGGER] RUECKWAERTS [WS2811 Kanal R aktiv] | Zaehler A: 2 B: 2`.
 4. **Stillstandstest:**
    * Nimm den Magneten ganz weg. Der Zustand (Weiß oder Rot) muss unbegrenzt stabil erhalten bleiben!
 

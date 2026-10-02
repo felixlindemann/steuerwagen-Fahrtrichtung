@@ -1,39 +1,43 @@
 /* =====================================================================================
- * Projekt:     Autonomer Fahrtrichtungs-Lichtwechsel für H0-Steuerwagen
- * (Märklin 78479) Datei:       breadboard_test.ino Beschreibung:Interaktiver
- * Diagnose- & Test-Sketch für den Breadboard-Aufbau.
- *              - Überprüfung der beiden A3144 Hall-Sensoren (Pinbelegung,
- * Funktion)
- *              - Testen der Magnetpolung (Reaktion auf Südpol an der
- * Beschriftungsseite)
+ * Projekt:     Autonomer Fahrtrichtungs-Lichtwechsel für H0-Steuerwagen (Märklin 78479)
+ * Datei:       breadboard_test.ino
+ * Beschreibung:Interaktiver Diagnose- & Test-Sketch für den Breadboard-Aufbau.
+ *              - Überprüfung der beiden A3144 Hall-Sensoren (Pinbelegung, Funktion)
+ *              - Testen der Magnetpolung (Reaktion auf Südpol an der Beschriftungsseite)
  *              - Echtzeit-Auswertung beider Richtungserkennungs-Methoden:
- *                  * Methode 1: Klassische Quadratur (A fallend -> B
- * Pegelabfrage)
+ *                  * Methode 1: Klassische Quadratur (A fallend -> B Pegelabfrage)
  *                  * Methode 2: Sequenzerkennung (A vor B vs. B vor A)
- *              - Ansteuerung von D4 (Weiß) und D5 (Rot PWM)
+ *              - Ansteuerung eines WS2811 LED-Treibers an Pin D6:
+ *                  * Vorwärtsbetrieb:  Kanal G aktiv (Pin G belegt, z. B. Spitzenlicht weiß)
+ *                  * Rückwärtsbetrieb: Kanal R aktiv (Pin R belegt, z. B. Schlusslicht rot)
  *              - Serielle Befehle zur Helligkeitsjustierung und Simulation
  * Baudrate:    115200 Baud
  * =====================================================================================
  */
 
 #include <Arduino.h>
+#include <Adafruit_NeoPixel.h>
 
-// --- Pin-Definitionen ---
+// --- Pin- & WS2811-Definitionen ---
 const uint8_t PIN_HALL_A = 2; // Hardware-Interrupt INT0
 const uint8_t PIN_HALL_B = 3; // Hardware-Interrupt INT1
-const uint8_t PIN_LED_WHITE =
-    4; // Frontlicht (3x warmweiß parallel mit je 1 kΩ)
-const uint8_t PIN_LED_RED =
-    5; // Schlusslicht (2x rot parallel mit je 1 kΩ, PWM)
+const uint8_t PIN_WS2811 = 6; // WS2811 Datenleitung DIN (Steuerung G=Vorwärts, R=Rückwärts)
+const uint8_t NUM_PIXELS = 1; // 1x WS2811 Controller-IC
+
+// WS2811 Konfiguration
+// Standard-WS2811 ICs erwarten Daten im RGB-Format (OUTR -> Byte 0, OUTG -> Byte 1, OUTB -> Byte 2)
+#define WS2811_TYPE (NEO_RGB + NEO_KHZ800)
+Adafruit_NeoPixel ws2811(NUM_PIXELS, PIN_WS2811, WS2811_TYPE);
 
 // --- Richtungs-Definitionen ---
 enum Direction {
   DIR_UNKNOWN = 0,
-  DIR_FORWARD, // Vorwärts: Frontlicht weiß aktiv
-  DIR_REVERSE  // Rückwärts: Schlusslicht rot aktiv
+  DIR_FORWARD, // Vorwärts: WS2811 Kanal G aktiv
+  DIR_REVERSE  // Rückwärts: WS2811 Kanal R aktiv
 };
 
 // --- Globale Variablen für Interrupts & Sensorik ---
+// Startet zu Testzwecken mit Vorwärts (Kanal G)
 volatile Direction currentDirection = DIR_FORWARD;
 volatile unsigned long lastTriggerTimeA = 0;
 volatile unsigned long lastTriggerTimeB = 0;
@@ -44,15 +48,19 @@ volatile Direction detectedByMethod1 = DIR_UNKNOWN; // Quadratur-Pegel
 volatile Direction detectedByMethod2 = DIR_UNKNOWN; // Sequenz-Reihenfolge
 volatile unsigned long eventDeltaMs = 0;
 
-// Entprell-Zeitfenster in Millisekunden (bei H0-Höchstgeschwindigkeit ca. 8 ms
-// Mindestzeit)
+// Entprell-Zeitfenster in Millisekunden (bei H0-Höchstgeschwindigkeit ca. 8 ms Mindestzeit)
 const unsigned long DEBOUNCE_MS = 8;
-// Maximales Zeitfenster (ms) zwischen Sensor A und B für eine zusammenhängende
-// Drehung
-const unsigned long SEQUENCE_TIMEOUT_MS = 2500;
+// Maximales Zeitfenster (ms) zwischen Sensor B und A für eine zusammenhängende Sequenz (gemessen ~75-80 ms)
+const unsigned long SEQUENCE_TIMEOUT_MS = 600;
 
-// PWM-Helligkeit für D5 (Rot) im Bereich 0 .. 255
-uint8_t redPwmValue = 180;
+// Helligkeitswerte für die Kanäle G (Vorwärts) und R (Rückwärts) (0 .. 255)
+uint8_t brightnessG = 255;
+uint8_t brightnessR = 255;
+
+// --- Automatische Wechselschaltung zu Testzwecken (2s Takt) ---
+bool autoToggleEnabled = true;
+const unsigned long AUTO_TOGGLE_INTERVAL_MS = 2000; // 2 Sekunden
+unsigned long lastToggleTime = 0;
 
 // Letzter bekannter Pin-Zustand für Live-Monitor
 int lastPinA = HIGH;
@@ -71,31 +79,30 @@ void isr_hall_a() {
 
   int stateB = digitalRead(PIN_HALL_B);
 
-  // Methode 1: Klassische Quadratur-Pegelabfrage
-  // Wenn A schaltet (fallende Flanke) und B ist noch HIGH -> A löste vor B aus
-  // -> Vorwärts Wenn A schaltet und B ist bereits aktiv (LOW) -> B löste vor A
-  // aus -> Rückwärts
-  if (stateB == HIGH) {
+  // 1. Überlappung: Wenn B bereits aktiv LOW ist -> B war zuerst -> B -> A = VORWÄRTS
+  if (stateB == LOW) {
     detectedByMethod1 = DIR_FORWARD;
-  } else {
-    detectedByMethod1 = DIR_REVERSE;
+    currentDirection = DIR_FORWARD;
+    lastTriggerTimeA = 0;
+    lastTriggerTimeB = 0;
+    triggerCountA++;
+    newTriggerEvent = true;
+    return;
   }
 
-  // Methode 2: Sequenzzeitpunkt-Vergleich
+  // 2. Sequenz: Sensor B hat kurz zuvor ausgelöst -> Sequenz B -> A = VORWÄRTS
   if (lastTriggerTimeB > 0 && (now - lastTriggerTimeB) < SEQUENCE_TIMEOUT_MS) {
-    // Sensor B hat kurz zuvor ausgelöst -> Bewegung war B -> A = Rückwärts
-    detectedByMethod2 = DIR_REVERSE;
-    eventDeltaMs = now - lastTriggerTimeB;
-  } else {
     detectedByMethod2 = DIR_FORWARD;
-    eventDeltaMs = 0;
+    eventDeltaMs = now - lastTriggerTimeB;
+    currentDirection = DIR_FORWARD;
+    lastTriggerTimeA = 0;
+    lastTriggerTimeB = 0;
+    triggerCountA++;
+    newTriggerEvent = true;
+    return;
   }
 
-  // Priorisierung: Wenn Methode 1 eindeutig (B==LOW) war B sicher aktiv.
-  // Wenn B==HIGH war, bestätigt Methode 2, ob A zuerst kam.
-  currentDirection =
-      (detectedByMethod1 == DIR_REVERSE) ? DIR_REVERSE : detectedByMethod2;
-
+  // B war nicht zuvor aktiv -> A startet eventuell A -> B
   lastTriggerTimeA = now;
   triggerCountA++;
   newTriggerEvent = true;
@@ -108,54 +115,54 @@ void isr_hall_b() {
     return; // Prellen ignorieren
   }
 
-  // Methode 2: Wenn Sensor A kurz zuvor ausgelöst hat -> A -> B = Vorwärts
-  if (lastTriggerTimeA > 0 && (now - lastTriggerTimeA) < SEQUENCE_TIMEOUT_MS) {
-    detectedByMethod2 = DIR_FORWARD;
-    eventDeltaMs = now - lastTriggerTimeA;
-    currentDirection = DIR_FORWARD;
-  } else {
-    // B hat als erstes ausgelöst -> bereite Rückwärts vor
-    detectedByMethod2 = DIR_REVERSE;
-    eventDeltaMs = 0;
+  int stateA = digitalRead(PIN_HALL_A);
+
+  // 1. Überlappung: Wenn A bereits aktiv LOW ist -> A war zuerst -> A -> B = RÜCKWÄRTS
+  if (stateA == LOW) {
+    detectedByMethod1 = DIR_REVERSE;
+    currentDirection = DIR_REVERSE;
+    lastTriggerTimeA = 0;
+    lastTriggerTimeB = 0;
+    triggerCountB++;
+    newTriggerEvent = true;
+    return;
   }
 
+  // 2. Sequenz: Sensor A hat kurz zuvor ausgelöst -> Sequenz A -> B = RÜCKWÄRTS
+  if (lastTriggerTimeA > 0 && (now - lastTriggerTimeA) < SEQUENCE_TIMEOUT_MS) {
+    detectedByMethod2 = DIR_REVERSE;
+    eventDeltaMs = now - lastTriggerTimeA;
+    currentDirection = DIR_REVERSE;
+    lastTriggerTimeA = 0;
+    lastTriggerTimeB = 0;
+    triggerCountB++;
+    newTriggerEvent = true;
+    return;
+  }
+
+  // A war nicht zuvor aktiv -> B startet eventuell B -> A
   lastTriggerTimeB = now;
   triggerCountB++;
   newTriggerEvent = true;
 }
 
-// Polarität & Fahrtrichtung:
-// true = Im Standard leuchtet Weiß (Active-LOW / Gemeinsame Anode)
-const bool LED_ACTIVE_LOW = true;
-
 // =====================================================================================
 // HILFSFUNKTIONEN
 // =====================================================================================
 
-void setWhiteLed(bool on) {
-  if (LED_ACTIVE_LOW) {
-    digitalWrite(PIN_LED_WHITE, on ? LOW : HIGH);
-  } else {
-    digitalWrite(PIN_LED_WHITE, on ? HIGH : LOW);
-  }
-}
-
-void setRedLed(uint8_t brightness) {
-  if (LED_ACTIVE_LOW) {
-    analogWrite(PIN_LED_RED, 255 - brightness);
-  } else {
-    analogWrite(PIN_LED_RED, brightness);
-  }
+void setWS2811(uint8_t r, uint8_t g, uint8_t b = 0) {
+  ws2811.setPixelColor(0, r, g, b);
+  ws2811.show();
 }
 
 void applyLighting() {
   if (currentDirection == DIR_FORWARD) {
-    setWhiteLed(true);
-    setRedLed(0); // Rot aus
+    // Vorwärts: Kanal G an (Spitzenlicht), Kanal R aus, Kanal B aus
+    setWS2811(0, brightnessG, 0);
     digitalWrite(LED_BUILTIN, HIGH);
   } else if (currentDirection == DIR_REVERSE) {
-    setWhiteLed(false); // Weiß aus
-    setRedLed(redPwmValue); // Rot gedimmt
+    // Rückwärts: Kanal R an (Schlusslicht), Kanal G aus, Kanal B aus
+    setWS2811(brightnessR, 0, 0);
     digitalWrite(LED_BUILTIN, LOW);
   }
 }
@@ -163,10 +170,10 @@ void applyLighting() {
 void printDirection(Direction d) {
   switch (d) {
   case DIR_FORWARD:
-    Serial.print(F("VORWAERTS [Front Weiss]"));
+    Serial.print(F("VORWAERTS [WS2811 Kanal G aktiv]"));
     break;
   case DIR_REVERSE:
-    Serial.print(F("RUECKWAERTS [Schluss Rot]"));
+    Serial.print(F("RUECKWAERTS [WS2811 Kanal R aktiv]"));
     break;
   default:
     Serial.print(F("UNBEKANNT"));
@@ -175,37 +182,41 @@ void printDirection(Direction d) {
 }
 
 void printBanner() {
-  Serial.println(
-      F("\n========================================================"));
+  Serial.println(F("\n========================================================"));
   Serial.println(F("  H0-STEUERWAGEN (Märklin 78479) - BREADBOARD TEST"));
-  Serial.println(F("  Autonomer Fahrtrichtungs-Lichtwechsel"));
+  Serial.println(F("  Autonomer Fahrtrichtungs-Lichtwechsel mit WS2811"));
   Serial.println(F("========================================================"));
   Serial.println(F("Pin-Belegung Arduino Nano:"));
   Serial.println(F("  D2 : Hall-Sensor A (INT0, INPUT_PULLUP)"));
   Serial.println(F("  D3 : Hall-Sensor B (INT1, INPUT_PULLUP)"));
-  Serial.println(F("  D4 : Frontlicht Weiss (3x LED via Vorwiderstand)"));
-  Serial.println(F("  D5 : Schlusslicht Rot (2x LED via PWM)"));
+  Serial.println(F("  D6 : WS2811 DIN (Data In)"));
+  Serial.println(F("         -> WS2811 Pin G: VORWAERTS  (Spitzenlicht)"));
+  Serial.println(F("         -> WS2811 Pin R: RUECKWAERTS (Schlusslicht)"));
   Serial.println(F("--------------------------------------------------------"));
   Serial.println(F("A3144 Belegung (Beschriftete Seite zeigt zum Magneten!):"));
   Serial.println(F("  Pin 1 (links) : 5V VCC"));
   Serial.println(F("  Pin 2 (mitte) : GND"));
   Serial.println(F("  Pin 3 (rechts): OUT -> an D2 bzw. D3"));
-  Serial.println(
-      F("  WICHTIG: Sensor A und B in GETRENNTE Steckbrett-Spalten stecken!"));
-  Serial.println(
-      F("  WICHTIG: Neodym-Magnet mit SUEDPOL zur Beschriftung halten!"));
+  Serial.println(F("  WICHTIG: Sensor A und B in GETRENNTE Steckbrett-Spalten stecken!"));
+  Serial.println(F("  WICHTIG: Neodym-Magnet mit SUEDPOL zur Beschriftung halten!"));
+  Serial.println(F("--------------------------------------------------------"));
+  Serial.println(F("WS2811 IC Belegung:"));
+  Serial.println(F("  Pin 1 (OUTR): Rueckwaerts-Licht Rot (LED Kathode)"));
+  Serial.println(F("  Pin 2 (OUTG): Vorwaerts-Licht Weiss (LED Kathode)"));
+  Serial.println(F("  Pin 4 (GND) : Masse (Arduino GND)"));
+  Serial.println(F("  Pin 6 (DIN) : Datenleitung an Arduino Pin D6"));
+  Serial.println(F("  Pin 8 (VDD) : 5V Versorgungsspannung"));
   Serial.println(F("--------------------------------------------------------"));
   Serial.println(F("Befehle im Serial Monitor:"));
   Serial.println(F("  'h' / '?' : Dieses Menue anzeigen"));
-  Serial.println(F("  's'       : Aktuellen Sensor- & Licht-Status ausgeben"));
-  Serial.println(F("  'w'       : Manuell Frontlicht WEISS einschalten"));
-  Serial.println(F("  'r'       : Manuell Schlusslicht ROT einschalten"));
-  Serial.println(F("  '+' / '-' : PWM-Helligkeit fuer ROT erhoehen/senken"));
-  Serial.println(
-      F("  '0'..'9'  : Helligkeit Rot direkt in 10er-Stufen setzen"));
+  Serial.println(F("  's'       : Aktuellen Sensor- & WS2811-Status ausgeben"));
+  Serial.println(F("  'g' / 'w' : Manuell VORWAERTS schalten (Kanal G)"));
+  Serial.println(F("  'r'       : Manuell RUECKWAERTS schalten (Kanal R)"));
+  Serial.println(F("  '+' / '-' : Helligkeit des aktiven Kanals erhoehen/senken"));
+  Serial.println(F("  '0'..'9'  : Helligkeit des aktiven Kanals in Stufen setzen"));
+  Serial.println(F("  't' / 'a' : Automatische Wechselschaltung (2s Takt) an/aus"));
   Serial.println(F("  'c'       : Zaehler zuruecksetzen"));
-  Serial.println(
-      F("========================================================\n"));
+  Serial.println(F("========================================================\n"));
 }
 
 void printCurrentStatus() {
@@ -224,11 +235,21 @@ void printCurrentStatus() {
   Serial.print(F("Gespeicherte Fahrtrichtung: "));
   printDirection(currentDirection);
   Serial.println();
-  Serial.print(F("LED-Ausgaenge: D4 (Weiss)="));
-  Serial.print(digitalRead(PIN_LED_WHITE));
-  Serial.print(F(" | D5 (Rot PWM)="));
-  Serial.print(redPwmValue);
-  Serial.println(F("\n------------------------"));
+  Serial.print(F("Automatische Wechselschaltung: "));
+  Serial.println(autoToggleEnabled ? F("AKTIV (2s Takt)") : F("INAKTIV"));
+  Serial.print(F("WS2811 an Pin D6: Kanal G (Vorwaerts)="));
+  Serial.print(brightnessG);
+  Serial.print(F(" | Kanal R (Rueckwaerts)="));
+  Serial.print(brightnessR);
+  Serial.print(F(" | Aktiv: "));
+  if (currentDirection == DIR_FORWARD) {
+    Serial.println(F("Kanal G (AN), Kanal R (AUS)"));
+  } else if (currentDirection == DIR_REVERSE) {
+    Serial.println(F("Kanal G (AUS), Kanal R (AN)"));
+  } else {
+    Serial.println(F("AUS"));
+  }
+  Serial.println(F("------------------------"));
 }
 
 void handleSerialCommands() {
@@ -244,33 +265,48 @@ void handleSerialCommands() {
   case 's':
     printCurrentStatus();
     break;
+  case 'g':
   case 'w':
+    autoToggleEnabled = false;
     currentDirection = DIR_FORWARD;
     applyLighting();
-    Serial.println(F("-> Manuell gesetzt: VORWAERTS (Frontlicht Weiss)"));
+    Serial.println(F("-> Manuell gesetzt: VORWAERTS (WS2811 Kanal G)"));
     break;
   case 'r':
+    autoToggleEnabled = false;
     currentDirection = DIR_REVERSE;
     applyLighting();
-    Serial.println(F("-> Manuell gesetzt: RUECKWAERTS (Schlusslicht Rot)"));
+    Serial.println(F("-> Manuell gesetzt: RUECKWAERTS (WS2811 Kanal R)"));
+    break;
+  case 't':
+  case 'a':
+    autoToggleEnabled = !autoToggleEnabled;
+    Serial.print(F("-> Automatische Wechselschaltung: "));
+    Serial.println(autoToggleEnabled ? F("AKTIVIERT (2s Takt)") : F("PAUSIERT"));
     break;
   case '+':
-    if (redPwmValue <= 235)
-      redPwmValue += 20;
-    else
-      redPwmValue = 255;
+    if (currentDirection == DIR_FORWARD) {
+      brightnessG = (brightnessG <= 235) ? (brightnessG + 20) : 255;
+      Serial.print(F("-> Helligkeit Kanal G (Vorwaerts) erhoeht auf: "));
+      Serial.println(brightnessG);
+    } else {
+      brightnessR = (brightnessR <= 235) ? (brightnessR + 20) : 255;
+      Serial.print(F("-> Helligkeit Kanal R (Rueckwaerts) erhoeht auf: "));
+      Serial.println(brightnessR);
+    }
     applyLighting();
-    Serial.print(F("-> Rotes PWM erhoeht auf: "));
-    Serial.println(redPwmValue);
     break;
   case '-':
-    if (redPwmValue >= 20)
-      redPwmValue -= 20;
-    else
-      redPwmValue = 0;
+    if (currentDirection == DIR_FORWARD) {
+      brightnessG = (brightnessG >= 20) ? (brightnessG - 20) : 0;
+      Serial.print(F("-> Helligkeit Kanal G (Vorwaerts) gesenkt auf: "));
+      Serial.println(brightnessG);
+    } else {
+      brightnessR = (brightnessR >= 20) ? (brightnessR - 20) : 0;
+      Serial.print(F("-> Helligkeit Kanal R (Rueckwaerts) gesenkt auf: "));
+      Serial.println(brightnessR);
+    }
     applyLighting();
-    Serial.print(F("-> Rotes PWM gesenkt auf: "));
-    Serial.println(redPwmValue);
     break;
   case '0':
   case '1':
@@ -283,13 +319,19 @@ void handleSerialCommands() {
   case '8':
   case '9': {
     uint8_t step = c - '0';
-    redPwmValue = (uint8_t)(step * 28.33); // 0 .. 255
-    applyLighting();
-    Serial.print(F("-> Rotes PWM auf Stufe "));
+    uint8_t val = (uint8_t)(step * 28.33); // 0 .. 255
+    if (currentDirection == DIR_FORWARD) {
+      brightnessG = val;
+      Serial.print(F("-> Helligkeit Kanal G (Vorwaerts) auf Stufe "));
+    } else {
+      brightnessR = val;
+      Serial.print(F("-> Helligkeit Kanal R (Rueckwaerts) auf Stufe "));
+    }
     Serial.print(step);
     Serial.print(F("/9 gesetzt (Wert: "));
-    Serial.print(redPwmValue);
+    Serial.print(val);
     Serial.println(F(")"));
+    applyLighting();
     break;
   }
   case 'c':
@@ -322,11 +364,13 @@ void setup() {
   // Pins konfigurieren
   pinMode(PIN_HALL_A, INPUT_PULLUP);
   pinMode(PIN_HALL_B, INPUT_PULLUP);
-  pinMode(PIN_LED_WHITE, OUTPUT);
-  pinMode(PIN_LED_RED, OUTPUT);
   pinMode(LED_BUILTIN, OUTPUT);
 
-  // Initialen Lichtzustand herstellen (Standard: Vorwärts = Frontlicht Weiß an)
+  // WS2811 initialisieren
+  ws2811.begin();
+  ws2811.show(); // Alle Kanäle zunächst dunkel
+
+  // Initialen Lichtzustand herstellen (Startet mit Vorwärts/G)
   applyLighting();
 
   // Eventuell anstehende Interrupt-Flags vor dem Scharfschalten löschen
@@ -336,6 +380,7 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(PIN_HALL_A), isr_hall_a, FALLING);
   attachInterrupt(digitalPinToInterrupt(PIN_HALL_B), isr_hall_b, FALLING);
 
+  lastToggleTime = millis();
   printBanner();
   printCurrentStatus();
 }
@@ -344,9 +389,12 @@ void loop() {
   // 1. Serielle Befehle einlesen
   handleSerialCommands();
 
-  // 2. Auswertung neuer Interrupt-Ereignisse
+  // 2. Auswertung neuer Interrupt-Ereignisse (Magnet)
   if (newTriggerEvent) {
     newTriggerEvent = false;
+
+    // Bei Magnetimpuls automatischen Wechsel pausieren
+    autoToggleEnabled = false;
 
     // Beleuchtung sofort aktualisieren
     applyLighting();
@@ -369,8 +417,24 @@ void loop() {
     Serial.println(triggerCountB);
   }
 
-  // 3. Kontinuierliche Pegelüberwachung (hilft bei statischem Heranhalten des
-  // Magneten)
+  // 3. Automatische Wechselschaltung (2 Sek Vorwärts/G, dann 2 Sek Rückwärts/R...)
+  if (autoToggleEnabled) {
+    unsigned long now = millis();
+    if (now - lastToggleTime >= AUTO_TOGGLE_INTERVAL_MS) {
+      lastToggleTime = now;
+      if (currentDirection == DIR_FORWARD) {
+        currentDirection = DIR_REVERSE;
+      } else {
+        currentDirection = DIR_FORWARD;
+      }
+      applyLighting();
+      Serial.print(F("[AUTO-WECHSEL] "));
+      printDirection(currentDirection);
+      Serial.println(F(" (fuer 2 Sekunden)"));
+    }
+  }
+
+  // 4. Kontinuierliche Pegelüberwachung (hilft bei statischem Heranhalten des Magneten)
   int currentPinA = digitalRead(PIN_HALL_A);
   int currentPinB = digitalRead(PIN_HALL_B);
 

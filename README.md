@@ -19,6 +19,8 @@ Dieses Repository enthält die vollständige Firmware, Schaltpläne, Montageanle
 ```
 steuerwagen-Fahrtrichtung/
 ├── firmware/
+│   ├── ws2811_test/
+│   │   └── ws2811_test.ino               # Standalone-Test für WS2811 (ohne Hall-Sensoren)
 │   ├── breadboard_test/
 │   │   └── breadboard_test.ino           # Interaktiver Test- & Diagnosesketch für Steckbrett
 │   └── steuerwagen_lichtwechsel/
@@ -39,10 +41,9 @@ steuerwagen-Fahrtrichtung/
 | :---: | :--- | :--- |
 | **D2** | Sensor A | Signal Hall-Sensor A (`INT0`, Hardware-Interrupt, `INPUT_PULLUP`) |
 | **D3** | Sensor B | Signal Hall-Sensor B (`INT1`, Hardware-Interrupt, `INPUT_PULLUP`) |
-| **D4** | Frontlicht Weiß | Ansteuerung 3× warmweiße SMD-LEDs (je 1 kΩ Vorwiderstand) |
-| **D5** | Schlusslicht Rot | Ansteuerung 2× rote SMD-LEDs (je 1 kΩ Vorwiderstand, PWM-gedimmt) |
+| **D6** | WS2811 DIN | Adressierbarer LED-Treiber: **Kanal G** = Vorwärts (Weiß), **Kanal R** = Rückwärts (Rot) |
 | **5V** | Betriebsspannung | Geregelte & gepufferte 5,0 V DC (hinter 1N5819 Schottky-Diode) |
-| **GND**| Gemeinsame Masse | Bezugspotenzial für Step-Down, Arduino, Sensoren und LEDs |
+| **GND**| Gemeinsame Masse | Bezugspotenzial für Step-Down, Arduino, Sensoren und WS2811 |
 
 ---
 
@@ -55,9 +56,9 @@ Vor dem finalen Einbau in den Steuerwagen werden die Sensoren und die Richtungsl
 2. Den Sketch [breadboard_test.ino](firmware/breadboard_test/breadboard_test.ino) auf den Arduino Nano flashen.
 3. Im Serial Monitor (**115200 Baud**) prüfen:
    * Magnet mit **Südpol** an die beschriftete Seite von A3144 halten $\rightarrow$ sofortige Erkennung.
-   * Wischen von A nach B $\rightarrow$ Frontlicht Weiß leuchtet, Richtungsstatus: `VORWÄRTS`.
-   * Wischen von B nach A $\rightarrow$ Schlusslicht Rot leuchtet, Richtungsstatus: `RÜCKWÄRTS`.
-   * Über die Tasten `+` / `-` oder `0`–`9` die perfekte LED-Dimmung für Rot ermitteln.
+   * Wischen von A nach B $\rightarrow$ WS2811 schaltet **Kanal G**, Richtungsstatus: `VORWÄRTS`.
+   * Wischen von B nach A $\rightarrow$ WS2811 schaltet **Kanal R**, Richtungsstatus: `RÜCKWÄRTS`.
+   * Über die Tasten `+` / `-` oder `0`–`9` die Helligkeit der Kanäle justieren.
 
 ### Schritt 2: Drehgestell-Sensorblock vorbereiten
 1. Mini-Platine (ca. $10 \times 7{,}5\text{ mm}$, 4×3 Lochraster) gemäß [drehgestell_montage_layout.md](docs/drehgestell_montage_layout.md) bestücken.

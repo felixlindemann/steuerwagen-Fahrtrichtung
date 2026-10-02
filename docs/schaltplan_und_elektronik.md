@@ -39,11 +39,12 @@
 | Pin: 5V       |   | 2x - 3x 100 µF / 25 V |<----+
 | Pin: GND <----+   | parallel gegen GND    |
 +---------------+   +-----------------------+
-    |    |    |    |
-    |    |    |    +---> D5 (PWM) ---> 2x [ 1 kΩ ] ---> 2x LED Rot (Schluss) ---> GND
-    |    |    +--------> D4       ---> 3x [ 1 kΩ ] ---> 3x LED Weiß (Front)  ---> GND
-    |    +-------------> D3 (INT1)<--- A3144 Hall-Sensor B (Signal OUT)
-    +------------------> D2 (INT0)<--- A3144 Hall-Sensor A (Signal OUT)
+    |    |    |
+    |    |    +---> D6 (DIN) ----> WS2811 (Pin 6 DIN)
+    |    |                         ├── OUTG (Pin 2) ---> Kathode (-) Vorwärts-LEDs (Weiß)
+    |    |                         └── OUTR (Pin 1) ---> Kathode (-) Rückwärts-LEDs (Rot)
+    |    +--------> D3 (INT1)<--- A3144 Hall-Sensor B (Signal OUT)
+    +-------------> D2 (INT0)<--- A3144 Hall-Sensor A (Signal OUT)
 ```
 
 ---
@@ -54,12 +55,14 @@
                           1N5819
     Step-Down (+) 5.3V ---->|----+-----------------------+--------------> Arduino 5V
                                  |                       |
-                                === 2-3x 100µF / 25V     |
+                                === 2-3x 100µF / 25V     +--------------> WS2811 VDD (Pin 8)
                                 === (Parallel)           +--------------> A3144 (A) VCC (Pin 1)
                                  |                       |
     Step-Down (-) GND -----------+-----------------------+--------------> A3144 (B) VCC (Pin 1)
                                  |                       |
                                  +-----------------------+--------------> Arduino GND
+                                 |                       |
+                                 +-----------------------+--------------> WS2811 GND (Pin 4)
                                  |                       |
                                  +-----------------------+--------------> A3144 (A) GND (Pin 2)
                                  |                       |
@@ -72,16 +75,19 @@
     Arduino D3 (INT1) <------------------------------------------------- A3144 (B) OUT (Pin 3)
     (INPUT_PULLUP aktiv)
 
+    Arduino D6 --------------------------------------------------------> WS2811 DIN (Pin 6)
 
-    Arduino D4 ------------------+----[ 1 kΩ ]---->| (LED Weiß 1 - Oben) ----+
-                                 +----[ 1 kΩ ]---->| (LED Weiß 2 - Links) ---+
-                                 +----[ 1 kΩ ]---->| (LED Weiß 3 - Rechts) --+
-                                                                             |
-    Arduino D5 (PWM) ------------+----[ 1 kΩ ]---->| (LED Rot 1 - Links) ----+
-                                 +----[ 1 kΩ ]---->| (LED Rot 2 - Rechts) ---+
-                                                                             |
-                                                                             v
-                                                                        Arduino GND
+    +5V (Versorgung) ------------+-----------------------+
+                                 |                       |
+                                 v Anode (+)             v Anode (+)
+                         [Vorwärts-LEDs]         [Rückwärts-LEDs]
+                                 | Kathode (-)           | Kathode (-)
+                                 v                       v
+    WS2811 OUTG (Pin 2) <--------+                       |
+    (Kanal G: Vorwärts aktiv)                            |
+                                                         |
+    WS2811 OUTR (Pin 1) <--------------------------------+
+    (Kanal R: Rückwärts aktiv)
 ```
 
 ---

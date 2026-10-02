@@ -1,24 +1,23 @@
 /* =====================================================================================
- * Projekt:     Autonomer Fahrtrichtungs-Lichtwechsel für H0-Steuerwagen
- * (Märklin 78479) Datei:       steuerwagen_lichtwechsel.ino Modell:      H0
- * Doppelstock-Steuerwagen DBbzfa 761 (Märklin 78479) Controller:  Arduino Nano
- * (ATmega328P, 5V / 16 MHz)
+ * Projekt:     Autonomer Fahrtrichtungs-Lichtwechsel für H0-Steuerwagen (Märklin 78479)
+ * Datei:       steuerwagen_lichtwechsel.ino
+ * Modell:      H0 Doppelstock-Steuerwagen DBbzfa 761 (Märklin 78479)
+ * Controller:  Arduino Nano (ATmega328P, 5V / 16 MHz)
  *
  * Funktionsweise:
  * - 2x unipolarer Hall-Sensor A3144 (D2/INT0 & D3/INT1) erfassen Raddrehung
- * - Neodym-Magnet (2x1 mm, Südpol nach außen) auf innerer Achse des hinteren
- * Drehgestells
- * - Automatische Umschaltung zwischen:
- *     * Vorwärts (Wagen voraus / geschoben): 3x warmweißes Spitzensignal (Pin
- * D4)
- *     * Rückwärts (Lok zieht / Steuerwagen hinten): 2x rotes Schlusslicht (Pin
- * D5, PWM-gedimmt)
+ * - Neodym-Magnet (2x1 mm, Südpol nach außen) auf innerer Achse des hinteren Drehgestells
+ * - Ansteuerung eines WS2811 LED-Treibers an Pin D6:
+ *     * Vorwärts:  Kanal G aktiv (Pin G des WS2811, z. B. Spitzenlicht weiß)
+ *     * Rückwärts: Kanal R aktiv (Pin R des WS2811, z. B. Schlusslicht rot)
  * - Beibehaltung des Zustands im Stillstand
+ * - Sanftes Überblenden (Soft-Fade) zwischen Kanal G und R
  * - Flacker- und Rauschunterdrückung gegen Gleisunregelmäßigkeiten
  * =====================================================================================
  */
 
 #include <Arduino.h>
+#include <Adafruit_NeoPixel.h>
 
 // =====================================================================================
 // KONFIGURATION & PIN-MAPPING
@@ -27,33 +26,34 @@
 // Pinbelegung
 const uint8_t PIN_HALL_A = 2;    // Hall-Sensor A (INT0, Hardware-Interrupt)
 const uint8_t PIN_HALL_B = 3;    // Hall-Sensor B (INT1, Hardware-Interrupt)
-const uint8_t PIN_LED_WHITE = 4; // 3x Front-LEDs Weiß (parallel mit je 1 kΩ)
-const uint8_t PIN_LED_RED =
-    5; // 2x Schluss-LEDs Rot (parallel mit je 1 kΩ, Timer0 PWM)
+const uint8_t PIN_WS2811 = 6;    // WS2811 Datenleitung DIN (Steuert Kanal G & R)
+const uint8_t NUM_PIXELS = 1;    // 1x WS2811 IC
+
+// WS2811 Objekt initialisieren (Standard: 800 kHz, Datenformat RGB für WS2811-Pins OUTR, OUTG, OUTB)
+#define WS2811_TYPE (NEO_RGB + NEO_KHZ800)
+Adafruit_NeoPixel ws2811(NUM_PIXELS, PIN_WS2811, WS2811_TYPE);
 
 // Beleuchtungs-Konfiguration
-const uint8_t RED_PWM_BRIGHTNESS =
-    160;                            // 0 .. 255: Dimmung des roten Schlusslichts
+const uint8_t BRIGHTNESS_G = 255;   // 0 .. 255: Helligkeit für Kanal G (Vorwärts / Spitzenlicht)
+const uint8_t BRIGHTNESS_R = 255;   // 0 .. 255: Helligkeit für Kanal R (Rückwärts / Schlusslicht)
 const bool ENABLE_SOFT_FADE = true; // Sanfter Übergang (weiches Auf-/Abblenden)
-const uint16_t FADE_STEP_MS =
-    12; // Zeit pro Fading-Schritt (weicher Wechsel ~250ms)
+const uint16_t FADE_STEP_MS = 12;   // Zeit pro Fading-Schritt (weicher Wechsel ~200-250ms)
 
 // Entprellung & Sensorik-Timing
-// Bei H0 Maßstab 1:87 entspricht Vorbild-Höchstgeschwindigkeit (160 km/h) ca.
-// 0.51 m/s. Raddurchmesser ca. 10.4 mm -> Radumfang ~32.7 mm -> ca. 15.6
-// Umdrehungen pro Sekunde (~64 ms pro Umdrehung). Ein Entprellfenster von 8 ms
-// schützt perfekt vor HF-Störungen ohne Impulse bei Maximaltempo zu verlieren.
+// Bei H0 Maßstab 1:87 entspricht Vorbild-Höchstgeschwindigkeit (160 km/h) ca. 0.51 m/s.
+// Raddurchmesser ca. 10.4 mm -> Radumfang ~32.7 mm -> ca. 15.6 Umdrehungen pro Sekunde (~64 ms pro Umdrehung).
+// Das gemessene Zeitfenster zwischen den eng benachbarten Sensoren B und A beträgt bei Handvorschub ca. 75-80 ms.
+// Mit SEQUENCE_TIMEOUT_MS = 600 ms werden auch Kriechgeschwindigkeiten sicher erfasst.
 const unsigned long DEBOUNCE_MS = 8;
-const unsigned long SEQUENCE_TIMEOUT_MS =
-    2500; // Max. Zeitabstand für Richtungserkennung
+const unsigned long SEQUENCE_TIMEOUT_MS = 600; // Max. Zeitabstand für Durchgang zwischen den Sensoren
 
 // =====================================================================================
 // TYPEN & ZUSTANDSVARIABLEN
 // =====================================================================================
 
 enum Direction : uint8_t {
-  DIR_FORWARD = 0, // Weiß an, Rot aus
-  DIR_REVERSE = 1  // Weiß aus, Rot an (PWM)
+  DIR_FORWARD = 0, // Kanal G an (Vorwärts), Kanal R aus
+  DIR_REVERSE = 1  // Kanal R an (Rückwärts), Kanal G aus
 };
 
 // Volatile Variablen für ISR
@@ -64,10 +64,10 @@ volatile unsigned long lastTriggerB = 0;
 
 // Aktueller Ausgabe-Status (für Fading)
 Direction activeDirection = DIR_FORWARD;
-uint8_t currentRedPwm = 0;
-uint8_t targetRedPwm = 0;
-bool currentWhiteOn = true;
-bool targetWhiteOn = true;
+uint8_t currentG = 0;
+uint8_t currentR = 0;
+uint8_t targetG = BRIGHTNESS_G;
+uint8_t targetR = 0;
 unsigned long lastFadeTime = 0;
 
 // =====================================================================================
@@ -84,29 +84,31 @@ void isr_hall_a() {
   int stateB = digitalRead(PIN_HALL_B);
 
   // 1. Fall: Signale überlappen sich (Sensor B ist noch aktiv LOW)
-  // Wenn B schon aktiv war, kam B vor A -> Eindeutig RÜCKWÄRTS
+  // B war zuerst da -> Bewegung B -> A = VORWÄRTS
   if (stateB == LOW) {
-    if (targetDirection != DIR_REVERSE) {
-      targetDirection = DIR_REVERSE;
-      directionChanged = true;
-    }
-  }
-  // 2. Fall: Keine Überlappung (B ist HIGH)
-  // Prüfen, ob B kurz zuvor ausgelöst hatte
-  else if (lastTriggerB > 0 && (now - lastTriggerB) < SEQUENCE_TIMEOUT_MS) {
-    // B feuerte kurz vor A -> RÜCKWÄRTS
-    if (targetDirection != DIR_REVERSE) {
-      targetDirection = DIR_REVERSE;
-      directionChanged = true;
-    }
-  } else {
-    // A hat als erstes gefeuert -> VORWÄRTS
     if (targetDirection != DIR_FORWARD) {
       targetDirection = DIR_FORWARD;
       directionChanged = true;
     }
+    lastTriggerA = 0;
+    lastTriggerB = 0;
+    return;
   }
 
+  // 2. Fall: Sequenz B -> A innerhalb des Zeitfensters
+  if (lastTriggerB > 0 && (now - lastTriggerB) < SEQUENCE_TIMEOUT_MS) {
+    // Sequenz B -> A vollendet: Eindeutig VORWÄRTS
+    if (targetDirection != DIR_FORWARD) {
+      targetDirection = DIR_FORWARD;
+      directionChanged = true;
+    }
+    // Sequenz abgeschlossen: Flags verbrauchen
+    lastTriggerA = 0;
+    lastTriggerB = 0;
+    return;
+  }
+
+  // B war nicht aktiv und kam nicht zuvor -> A startet eventuell eine A -> B Sequenz
   lastTriggerA = now;
 }
 
@@ -117,33 +119,55 @@ void isr_hall_b() {
     return; // Prellen verwerfen
   }
 
-  // Wenn Sensor A kurz zuvor gefeuert hat -> Sequenz A -> B = VORWÄRTS
-  if (lastTriggerA > 0 && (now - lastTriggerA) < SEQUENCE_TIMEOUT_MS) {
-    if (targetDirection != DIR_FORWARD) {
-      targetDirection = DIR_FORWARD;
+  int stateA = digitalRead(PIN_HALL_A);
+
+  // 1. Fall: Signale überlappen sich (Sensor A ist noch aktiv LOW)
+  // A war zuerst da -> Bewegung A -> B = RÜCKWÄRTS
+  if (stateA == LOW) {
+    if (targetDirection != DIR_REVERSE) {
+      targetDirection = DIR_REVERSE;
       directionChanged = true;
     }
+    lastTriggerA = 0;
+    lastTriggerB = 0;
+    return;
   }
 
+  // 2. Fall: Sequenz A -> B innerhalb des Zeitfensters
+  if (lastTriggerA > 0 && (now - lastTriggerA) < SEQUENCE_TIMEOUT_MS) {
+    // Sequenz A -> B vollendet: Eindeutig RÜCKWÄRTS
+    if (targetDirection != DIR_REVERSE) {
+      targetDirection = DIR_REVERSE;
+      directionChanged = true;
+    }
+    // Sequenz abgeschlossen: Flags verbrauchen
+    lastTriggerA = 0;
+    lastTriggerB = 0;
+    return;
+  }
+
+  // A war nicht aktiv und kam nicht zuvor -> B startet eventuell eine B -> A Sequenz
   lastTriggerB = now;
 }
 
 // =====================================================================================
-// BELEUCHTUNGSSTEUERUNG
+// BELEUCHTUNGSSTEUERUNG (WS2811)
 // =====================================================================================
+
+void setWS2811(uint8_t r, uint8_t g, uint8_t b = 0) {
+  ws2811.setPixelColor(0, r, g, b);
+  ws2811.show();
+}
 
 void updateLightingInstant() {
   if (targetDirection == DIR_FORWARD) {
-    digitalWrite(PIN_LED_WHITE, HIGH);
-    analogWrite(PIN_LED_RED, 0);
-    currentWhiteOn = true;
-    currentRedPwm = 0;
+    currentG = BRIGHTNESS_G;
+    currentR = 0;
   } else {
-    digitalWrite(PIN_LED_WHITE, LOW);
-    analogWrite(PIN_LED_RED, RED_PWM_BRIGHTNESS);
-    currentWhiteOn = false;
-    currentRedPwm = RED_PWM_BRIGHTNESS;
+    currentG = 0;
+    currentR = BRIGHTNESS_R;
   }
+  setWS2811(currentR, currentG, 0);
   activeDirection = targetDirection;
 }
 
@@ -156,30 +180,35 @@ void updateLightingFaded() {
 
   // Zielwerte festlegen
   if (targetDirection == DIR_FORWARD) {
-    targetWhiteOn = true;
-    targetRedPwm = 0;
+    targetG = BRIGHTNESS_G;
+    targetR = 0;
   } else {
-    targetWhiteOn = false;
-    targetRedPwm = RED_PWM_BRIGHTNESS;
+    targetG = 0;
+    targetR = BRIGHTNESS_R;
   }
 
-  // Rotes Licht faden
-  if (currentRedPwm < targetRedPwm) {
-    currentRedPwm = min((uint16_t)targetRedPwm, (uint16_t)(currentRedPwm + 15));
-    analogWrite(PIN_LED_RED, currentRedPwm);
-  } else if (currentRedPwm > targetRedPwm) {
-    currentRedPwm = (currentRedPwm > 15) ? (currentRedPwm - 15) : 0;
-    analogWrite(PIN_LED_RED, currentRedPwm);
+  bool changed = false;
+
+  // Kanal G faden
+  if (currentG < targetG) {
+    currentG = min((uint16_t)targetG, (uint16_t)(currentG + 15));
+    changed = true;
+  } else if (currentG > targetG) {
+    currentG = (currentG > 15) ? (currentG - 15) : 0;
+    changed = true;
   }
 
-  // Weißes Licht umschalten (erst wenn Rot weitgehend ausgeblendet ist bzw.
-  // sanft geschaltet)
-  if (targetWhiteOn && !currentWhiteOn && currentRedPwm < 50) {
-    digitalWrite(PIN_LED_WHITE, HIGH);
-    currentWhiteOn = true;
-  } else if (!targetWhiteOn && currentWhiteOn) {
-    digitalWrite(PIN_LED_WHITE, LOW);
-    currentWhiteOn = false;
+  // Kanal R faden
+  if (currentR < targetR) {
+    currentR = min((uint16_t)targetR, (uint16_t)(currentR + 15));
+    changed = true;
+  } else if (currentR > targetR) {
+    currentR = (currentR > 15) ? (currentR - 15) : 0;
+    changed = true;
+  }
+
+  if (changed) {
+    setWS2811(currentR, currentG, 0);
   }
 
   activeDirection = targetDirection;
@@ -190,18 +219,19 @@ void updateLightingFaded() {
 // =====================================================================================
 
 void setup() {
-  // Serielle Schnittstelle für Debugging ohne LEDs
+  // Serielle Schnittstelle für Debugging
   Serial.begin(115200);
 
   // Pins initialisieren
   pinMode(PIN_HALL_A, INPUT_PULLUP);
   pinMode(PIN_HALL_B, INPUT_PULLUP);
-  pinMode(PIN_LED_WHITE, OUTPUT);
-  pinMode(PIN_LED_RED, OUTPUT);
-  pinMode(LED_BUILTIN,
-          OUTPUT); // Onboard-LED auf Pin 13 als optischer Indikator
+  pinMode(LED_BUILTIN, OUTPUT); // Onboard-LED auf Pin 13 als optischer Indikator
 
-  // Initialer Zustand: Vorwärts (Frontlicht weiß an, Onboard-LED an)
+  // WS2811 initialisieren
+  ws2811.begin();
+  ws2811.show(); // Alle Kanäle zunächst dunkel
+
+  // Initialer Zustand: Vorwärts (Kanal G an, Onboard-LED an)
   updateLightingInstant();
   digitalWrite(LED_BUILTIN, HIGH);
 
@@ -209,14 +239,13 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(PIN_HALL_A), isr_hall_a, FALLING);
   attachInterrupt(digitalPinToInterrupt(PIN_HALL_B), isr_hall_b, FALLING);
 
-  Serial.println(
-      F("\n========================================================"));
+  Serial.println(F("\n========================================================"));
   Serial.println(F(" Steuerwagen Fahrtrichtungs-Lichtwechsel (Märklin 78479)"));
+  Serial.println(F(" WS2811 an Pin D6 (Kanal G = Vorwaerts, Kanal R = Rueckwaerts)"));
   Serial.println(F(" Debug-Ausgabe aktiv (115200 Baud)"));
   Serial.println(F(" Hinweis: Onboard-LED (Pin 13) leuchtet bei VORWAERTS"));
-  Serial.println(F(" Initialer Zustand: VORWAERTS [Frontlicht WEISS]"));
-  Serial.println(
-      F("========================================================\n"));
+  Serial.println(F(" Initialer Zustand: VORWAERTS [WS2811 Kanal G aktiv]"));
+  Serial.println(F("========================================================\n"));
 }
 
 void loop() {
@@ -229,11 +258,10 @@ void loop() {
     Serial.print(F(" ms] RICHTUNGSWECHSEL ERKANNT -> "));
 
     if (targetDirection == DIR_FORWARD) {
-      Serial.println(F(">>> VORWAERTS (Frontlicht WEISS) | Onboard-LED: AN"));
+      Serial.println(F(">>> VORWAERTS (WS2811 Kanal G) | Onboard-LED: AN"));
       digitalWrite(LED_BUILTIN, HIGH);
     } else {
-      Serial.println(
-          F("<<< RUECKWAERTS (Schlusslicht ROT) | Onboard-LED: AUS"));
+      Serial.println(F("<<< RUECKWAERTS (WS2811 Kanal R) | Onboard-LED: AUS"));
       digitalWrite(LED_BUILTIN, LOW);
     }
 
